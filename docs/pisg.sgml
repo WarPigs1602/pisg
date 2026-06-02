@@ -109,6 +109,8 @@ manpage.1: manpage.sgml
 
       <varlistentry><term><option>-mo --moduledir=</option></term><listitem><para>Directory containing pisg modules</para></listitem></varlistentry>
 
+      <varlistentry><term><option>-j --workers=</option></term><listitem><para>Number of channels to process in parallel</para></listitem></varlistentry>
+
       <varlistentry><term><option>-s --silent</option></term><listitem><para>Suppress output (except error
       messages)</para></listitem></varlistentry>
 

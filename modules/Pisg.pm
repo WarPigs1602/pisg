@@ -19,7 +19,28 @@ package Pisg;
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 use strict;
+use Config;
 $^W = 1;
+
+sub _channel_cfg_from
+{
+    my ($self, $channel, $basecfg_ref) = @_;
+    my %cfg = %{$basecfg_ref};
+
+    foreach my $chan (keys %{$channel}) {
+        $cfg{$_} = $channel->{$chan}->{$_} foreach (keys %{$channel->{$chan}});
+    }
+
+    return \%cfg;
+}
+
+sub _run_channel_cfg
+{
+    my ($self, $channel, $basecfg_ref) = @_;
+    my $cfg_ref = $self->_channel_cfg_from($channel, $basecfg_ref);
+    %{$self->{cfg}} = %{$cfg_ref};
+    return $self->do_channel();
+}
 
 sub new
 {
@@ -217,6 +238,7 @@ sub get_default_config_settings
         statsdump => '',           # Debug option
         modules_dir => '',         # set in get_cmdline_options
         cchannels => '',           # set in get_cmdline_options
+        workers => 1,
 
         version => "0.80-preview2"
     };
@@ -475,6 +497,7 @@ sub do_channel
         print STDERR "No logfile or logdir defined for " . $self->{cfg}->{channel} . "\n";
     } elsif (!$self->{cfg}->{format}) {
         print STDERR "No format defined for $self->{cfg}->{channel}.\n";
+        return 0;
     } else {
         $self->init_pisg();        # Init some general things
 
@@ -492,7 +515,7 @@ use Pisg::Parser::$self->{cfg}->{logtype};
 _END
         if ($@) {
             print STDERR "Could not load stats analyzer for '$self->{cfg}->{logtype}': $@\n";
-            return undef;
+            return 0;
         }
 
         my $stats = $analyzer->analyze();
@@ -512,7 +535,7 @@ _END
 
         if ($@) {
             print STDERR "Could not load stats generator (Pisg::HTMLGenerator): $@\n";
-            return undef;
+            return 0;
         }
 
         # Create our HTML page if the logfile has any data.
@@ -535,13 +558,17 @@ _END
         restore_aliases();
 
         $self->{cfg}->{chan_done}{$self->{cfg}->{channel}} = 1;
+        return 1;
     }
+
+    return 0;
 }
 
 sub parse_channels
 {
     my $self = shift;
     my %origcfg = %{ $self->{cfg} };
+    my $workers = $self->{cfg}->{workers};
     
     # make a list of channels to do
     my @chanlist;
@@ -563,13 +590,95 @@ sub parse_channels
         push @chanlist, $_ foreach (@{ $self->{chans} });
     }
 
-    foreach my $channel (@chanlist) {
-        foreach my $chan (keys %{ $channel }) { # import channel specific config
-            $self->{cfg}->{$_} = $channel->{$chan}->{$_} foreach (keys %{ $channel->{$chan} });
+    if (!defined($workers) || $workers !~ /^\d+$/ || $workers < 1) {
+        print STDERR "Warning: Invalid Workers setting '$workers', using 1\n";
+        $workers = 1;
+    }
+
+    if ($workers > 1 && (!$Config::Config{d_fork})) {
+        print STDERR "Warning: This Perl build has no fork support, running channels sequentially\n"
+            unless $self->{cfg}->{silent};
+        $workers = 1;
+    }
+
+    if ($workers <= 1 || scalar(@chanlist) <= 1) {
+        foreach my $channel (@chanlist) {
+            $self->_run_channel_cfg($channel, \%origcfg);
+            $origcfg{chan_done} = $self->{cfg}->{chan_done};
+            %{ $self->{cfg} } = %origcfg;
         }
-        $self->do_channel();
-        $origcfg{chan_done} = $self->{cfg}->{chan_done};
-        %{ $self->{cfg} } = %origcfg;
+        return;
+    }
+
+    my @running;
+    my %pid_to_channel;
+    my $had_error = 0;
+    my $fork_broken = 0;
+
+    foreach my $channel (@chanlist) {
+        while (scalar(@running) >= $workers) {
+            my $pid = wait();
+            @running = grep { $_ != $pid } @running;
+            if ($? == 0 && defined($pid_to_channel{$pid})) {
+                $self->{cfg}->{chan_done}{$pid_to_channel{$pid}} = 1;
+            } elsif ($? != 0) {
+                $had_error = 1;
+            }
+            delete $pid_to_channel{$pid};
+        }
+
+        if ($fork_broken) {
+            my $ok = $self->_run_channel_cfg($channel, \%origcfg);
+            my ($chan_name) = keys %{$channel};
+            if ($ok) {
+                $self->{cfg}->{chan_done}{$chan_name} = 1;
+            } else {
+                $had_error = 1;
+            }
+            $origcfg{chan_done} = $self->{cfg}->{chan_done};
+            %{ $self->{cfg} } = %origcfg;
+            next;
+        }
+
+        my $pid = fork();
+        if (!defined($pid)) {
+            print STDERR "Warning: fork failed ($!), running remaining channels sequentially\n";
+            $fork_broken = 1;
+            my $ok = $self->_run_channel_cfg($channel, \%origcfg);
+            my ($chan_name) = keys %{$channel};
+            if ($ok) {
+                $self->{cfg}->{chan_done}{$chan_name} = 1;
+            } else {
+                $had_error = 1;
+            }
+            $origcfg{chan_done} = $self->{cfg}->{chan_done};
+            %{ $self->{cfg} } = %origcfg;
+            next;
+        }
+
+        if ($pid == 0) {
+            my $ok = $self->_run_channel_cfg($channel, \%origcfg);
+            exit($ok ? 0 : 1);
+        }
+
+        push @running, $pid;
+        my ($chan_name) = keys %{$channel};
+        $pid_to_channel{$pid} = $chan_name;
+    }
+
+    while (@running) {
+        my $pid = wait();
+        @running = grep { $_ != $pid } @running;
+        if ($? == 0 && defined($pid_to_channel{$pid})) {
+            $self->{cfg}->{chan_done}{$pid_to_channel{$pid}} = 1;
+        } elsif ($? != 0) {
+            $had_error = 1;
+        }
+        delete $pid_to_channel{$pid};
+    }
+
+    if ($had_error) {
+        print STDERR "Warning: One or more channels failed during parallel processing\n";
     }
 }
 

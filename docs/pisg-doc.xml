@@ -680,6 +680,41 @@
     </refsect1>
     </refentry>
 
+    <!-- *** WORKERS *** -->
+    <refentry id="Workers">
+
+    <refmeta> <refentrytitle>Workers</refentrytitle> </refmeta>
+
+    <refnamediv>
+    <refname>Workers</refname>
+    <refpurpose>number of channels to process in parallel</refpurpose>
+    </refnamediv>
+
+    <refsynopsisdiv><programlisting>
+      <![CDATA[
+        <set Workers="4">
+
+        # command line:
+        pisg -j 4
+      ]]>
+    </programlisting></refsynopsisdiv>
+
+    <refsect1>
+    <title>Description</title>
+    <para>
+    <command>Workers</command> controls how many channels from the
+    configuration are processed in parallel. Set this to a positive integer.
+    A value of <literal>1</literal> keeps the old sequential behavior.
+    If your Perl build does not support <command>fork</command>, pisg will
+    automatically fall back to sequential processing.
+    </para>
+    </refsect1>
+    <refsect1>
+    <title>Default</title>
+    <para> 1 </para>
+    </refsect1>
+    </refentry>
+
     <!-- *** MAINTAINER *** -->
     <refentry id="Maintainer">
 

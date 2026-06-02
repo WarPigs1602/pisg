@@ -85,7 +85,7 @@ sub get_cmdline_options
 
 my $usage = <<END_USAGE;
 Usage: pisg [-ch channel] [-l logfile] [-o outputfile] [-ma maintainer]
-[-f format] [-ne network] [-d logdir] [-mo moduledir] [-s] [-v] [-h]
+[-f format] [-ne network] [-d logdir] [-mo moduledir] [-j workers] [-s] [-v] [-h]
 
 -ch --channel=xxx      : Set channel name
 -cc --cchannels=xxx    : Only do this channel from cfg file, give multiple
@@ -105,6 +105,8 @@ Usage: pisg [-ch channel] [-l logfile] [-o outputfile] [-ma maintainer]
 -cf --cfg opt=value    : Specify configuration options, eg. -cf ShowWpl=1
 -co --configfile=xxx   : Configuration file
 -mo --moduledir=xxx    : Directory containing pisg modules
+-j  --workers=xxx      : Number of channels to process in parallel
+                         (default: 1)
 -s  --silent           : Suppress output (except error messages)
 -v  --version          : Show version
 -h  --help             : Output this message and exit.
@@ -129,6 +131,7 @@ END_USAGE
                    'nfiles=i'     => \$cfg{nfiles},
                    'prefix=s'     => \$cfg{logprefix},
                    'moduledir=s'  => \$cfg{moduledir},
+                   'workers|j=i'  => \$cfg{workers},
                    'configfile=s' => \$cfg{configfile},
                    'ignorefile=s' => \$tmp,
                    'aliasfile=s'  => \$tmp,
