@@ -5,6 +5,7 @@ package Pisg::Parser::Logfile;
 
 use strict;
 use Storable;
+use Fcntl qw(:flock);
 
 $^W = 1;
 
@@ -12,6 +13,8 @@ $^W = 1;
 use Data::Dumper;
 $Data::Dumper::Indent = 1;
 my $cache;
+my %logfile_checksum_cache;
+my %runtime_cache_hit;
 
 # test for Text::Iconv
 my $have_iconv = 1;
@@ -103,6 +106,10 @@ sub analyze
         push @logfiles, $self->_parse_dir($logdir); # get all files in dir
     }
 
+    # Avoid parsing the same logfile multiple times in one run.
+    my %seen_logfiles;
+    @logfiles = grep { defined($_) && !$seen_logfiles{$_}++ } @logfiles;
+
     my $count = @logfiles;
     my $shift = 0;
     if($self->{cfg}->{nfiles} > 0) { # chop list to maximal length
@@ -133,6 +140,8 @@ sub analyze
         delete $self->{cfg}->{cachedir};
     }
 
+    my %resolved_cached_alias;
+
     foreach my $logfile (@logfiles) {
         # Run through the logfile
         print "Analyzing log $logfile... " unless ($self->{cfg}->{silent});
@@ -147,16 +156,31 @@ sub analyze
         };
         my $l = {};
 
-        if ($self->{cfg}->{cachedir} and $self->_read_cache(\$s, \$l, $logfile)) {
-            # take care of false nicks/words, this only happens with cache
-            foreach (keys %{$s->{lastvisited}}) {
-                find_alias($_);
+        if ($self->{cfg}->{cachedir}) {
+            if ($self->_read_cache(\$s, \$l, $logfile)) {
+                # take care of false nicks/words, this only happens with cache
+                foreach (keys %{$s->{lastvisited}}) {
+                    next if $resolved_cached_alias{$_}++;
+                    find_alias($_);
+                }
+            } else {
+                my $lock_fh = $self->_acquire_cache_lock($logfile);
+
+                # Re-check after locking: another worker might have just filled the cache.
+                if ($self->_read_cache(\$s, \$l, $logfile)) {
+                    foreach (keys %{$s->{lastvisited}}) {
+                        next if $resolved_cached_alias{$_}++;
+                        find_alias($_);
+                    }
+                } else {
+                    $self->_parse_file($s, $l, $logfile);
+                    $self->_update_cache($s, $l, $logfile);
+                }
+
+                $self->_release_cache_lock($lock_fh);
             }
         } else {
             $self->_parse_file($s, $l, $logfile);
-            if ($self->{cfg}->{cachedir}) {
-                $self->_update_cache($s, $l, $logfile);
-            }
         }
         $self->_merge_stats(\%stats, $s); # merge per-file stats into global stats
         $self->_merge_lines(\%lines, $l);
@@ -800,10 +824,23 @@ sub _adjusttimeoffset
 sub _read_cache
 {
     my ($self, $statsref, $linesref, $logfile) = @_;
-    my $csum = (split(' ', `sum -s $logfile`))[0];
-    my $cachefile = $logfile;
-    $cachefile =~ s/[^\w-]/_/go;
-    $cachefile = "$self->{cfg}->{cachedir}/$cachefile";
+    my $cachefile = $self->_cache_base_path($logfile);
+    my ($mtime, $size) = $self->_logfile_stat($logfile);
+    my $runtime_key;
+
+    if (defined $mtime and defined $size) {
+        $runtime_key = join('|', $cachefile, 'm', $mtime, $size, ($self->{cfg}->{version} || ''));
+    } else {
+        my $csum = $self->_logfile_checksum($logfile);
+        $runtime_key = join('|', $cachefile, 'c', $csum, ($self->{cfg}->{version} || ''));
+    }
+
+    if (exists $runtime_cache_hit{$runtime_key}) {
+        print "cached, " unless $self->{cfg}->{silent};
+        $$statsref = $runtime_cache_hit{$runtime_key}->{stats};
+        $$linesref = $runtime_cache_hit{$runtime_key}->{lines};
+        return 1;
+    }
 
     return undef unless -e "$cachefile.pisglines";
     return undef unless -e "$cachefile.pisgstats";
@@ -813,11 +850,21 @@ sub _read_cache
 
     return undef if $stats->{version} and $stats->{version} ne $self->{cfg}->{version};
     return undef unless $stats->{logfile} eq $logfile; # the name might be ambigous
-    return undef if $stats->{logfile_csum} != $csum; # file has changed
+
+    if (defined $mtime and defined $size and defined $stats->{logfile_mtime} and defined $stats->{logfile_size}) {
+        return undef if $stats->{logfile_mtime} != $mtime || $stats->{logfile_size} != $size;
+    } else {
+        my $csum = $self->_logfile_checksum($logfile);
+        return undef if !defined($stats->{logfile_csum}) || $stats->{logfile_csum} != $csum; # file has changed
+    }
 
     print "cached, " unless $self->{cfg}->{silent};
     $$statsref = $stats;
     $$linesref = $lines;
+    $runtime_cache_hit{$runtime_key} = {
+        stats => $stats,
+        lines => $lines,
+    };
 
     return 1;
 }
@@ -825,16 +872,68 @@ sub _read_cache
 sub _update_cache
 {
     my ($self, $stats, $lines, $logfile) = @_;
-    my $csum = (split(' ', `sum -s $logfile`))[0];
-    my $cachefile = $logfile;
-    $cachefile =~ s/[^\w-]/_/g;
-    $cachefile = "$self->{cfg}->{cachedir}/$cachefile";
+    my $cachefile = $self->_cache_base_path($logfile);
+    my ($mtime, $size) = $self->_logfile_stat($logfile);
 
     $stats->{logfile} = $logfile;
-    $stats->{logfile_csum} = $csum;
+    $stats->{logfile_mtime} = $mtime if defined $mtime;
+    $stats->{logfile_size} = $size if defined $size;
+    if (exists $stats->{logfile_csum} || !defined($mtime) || !defined($size)) {
+        $stats->{logfile_csum} = $self->_logfile_checksum($logfile);
+    }
 
     store $stats, "$cachefile.pisgstats";
     store $lines, "$cachefile.pisglines";
+}
+
+sub _cache_base_path
+{
+    my ($self, $logfile) = @_;
+    my $cachefile = $logfile;
+    $cachefile =~ s/[^\w-]/_/go;
+    return "$self->{cfg}->{cachedir}/$cachefile";
+}
+
+sub _acquire_cache_lock
+{
+    my ($self, $logfile) = @_;
+    my $lockfile = $self->_cache_base_path($logfile) . ".lock";
+
+    open(my $fh, '>>', $lockfile) or return undef;
+    flock($fh, LOCK_EX) or return undef;
+
+    return $fh;
+}
+
+sub _release_cache_lock
+{
+    my ($self, $fh) = @_;
+    return unless $fh;
+
+    flock($fh, LOCK_UN);
+    close($fh);
+}
+
+sub _logfile_checksum
+{
+    my ($self, $logfile) = @_;
+
+    if (exists $logfile_checksum_cache{$logfile}) {
+        return $logfile_checksum_cache{$logfile};
+    }
+
+    my $csum = (split(' ', `sum -s $logfile`))[0];
+    $logfile_checksum_cache{$logfile} = $csum;
+    return $csum;
+}
+
+sub _logfile_stat
+{
+    my ($self, $logfile) = @_;
+    my @st = stat($logfile);
+    return (undef, undef) unless @st;
+
+    return ($st[9], $st[7]);
 }
 
 sub _merge_stats

@@ -610,15 +610,16 @@ sub parse_channels
         return;
     }
 
-    my @running;
+    my %running;
     my %pid_to_channel;
     my $had_error = 0;
     my $fork_broken = 0;
 
     foreach my $channel (@chanlist) {
-        while (scalar(@running) >= $workers) {
+        while (scalar(keys %running) >= $workers) {
             my $pid = wait();
-            @running = grep { $_ != $pid } @running;
+            last if $pid == -1;
+            delete $running{$pid};
             if ($? == 0 && defined($pid_to_channel{$pid})) {
                 $self->{cfg}->{chan_done}{$pid_to_channel{$pid}} = 1;
             } elsif ($? != 0) {
@@ -661,14 +662,15 @@ sub parse_channels
             exit($ok ? 0 : 1);
         }
 
-        push @running, $pid;
+        $running{$pid} = 1;
         my ($chan_name) = keys %{$channel};
         $pid_to_channel{$pid} = $chan_name;
     }
 
-    while (@running) {
+    while (scalar(keys %running)) {
         my $pid = wait();
-        @running = grep { $_ != $pid } @running;
+        last if $pid == -1;
+        delete $running{$pid};
         if ($? == 0 && defined($pid_to_channel{$pid})) {
             $self->{cfg}->{chan_done}{$pid_to_channel{$pid}} = 1;
         } elsif ($? != 0) {

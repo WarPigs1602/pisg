@@ -320,6 +320,17 @@ sub _htmlfooter
 
     my $stats_gen = $self->_template_text('stats_gen_by', %hash);
     my $stats_text = $self->_template_text('stats_gen_in', %hash);
+    if ($self->{cfg}->{workers} && $self->{cfg}->{workers} > 1) {
+        my $multithread_text = $self->{tmps}->{$self->{cfg}->{lang}}{stats_multithreaded}
+            || $self->{tmps}->{EN}{stats_multithreaded}
+            || 'multithreaded: [:workers] workers';
+        if($self->{iconv}) {
+            $multithread_text = $self->{iconv}->convert($multithread_text);
+            die("Could not convert charset for template 'stats_multithreaded'.\n") unless $multithread_text;
+        }
+        $multithread_text =~ s/\[:workers\]/$self->{cfg}->{workers}/g;
+        $stats_text .= " [$multithread_text]";
+    }
 
     _html( <<HTML );
 <div id="footer" class="small">
@@ -328,7 +339,7 @@ sub _htmlfooter
 </div>
 HTML
 
-    _html( sprintf( qq(<!-- NFiles = "%s"; Format = "%s"; Lang = "%s"; LangFile = "%s"; Charset = "%s"; LogCharset = "%s"; LogCharsetFallback = "%s"; LogPrefix = "%s"; LogSuffix = "%s"; NickTracking = "%s"; TimeOffset = "%s" -->),
+    _html( sprintf( qq(<!-- NFiles = "%s"; Format = "%s"; Lang = "%s"; LangFile = "%s"; Charset = "%s"; LogCharset = "%s"; LogCharsetFallback = "%s"; LogPrefix = "%s"; LogSuffix = "%s"; NickTracking = "%s"; TimeOffset = "%s"; Workers = "%s"; Multithreaded = "%s" -->),
         $self->{cfg}->{nfiles},
         $self->{cfg}->{format},
         $self->{cfg}->{lang},
@@ -339,7 +350,9 @@ HTML
         $self->{cfg}->{logprefix},
         $self->{cfg}->{logsuffix},
         $self->{cfg}->{nicktracking},
-        $self->{cfg}->{timeoffset}
+        $self->{cfg}->{timeoffset},
+        $self->{cfg}->{workers},
+        ($self->{cfg}->{workers} && $self->{cfg}->{workers} > 1) ? 'yes' : 'no'
     ));
     
     if($self->{cfg}->{colorscheme} ne "none") {
